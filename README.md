@@ -1,4 +1,4 @@
-# @szechyjs/opencode-claude-gateway
+# opencode-claude-gateway
 
 An [OpenCode](https://opencode.ai) V2 plugin that connects to Anthropic's
 official [Claude apps gateway](https://code.claude.com/docs/en/claude-apps-gateway)
@@ -36,7 +36,7 @@ It's a thin layer on top of OpenCode's stock `anthropic` provider package:
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "@szechyjs/opencode-claude-gateway",
+      "package": "opencode-claude-gateway",
       "options": {
         "baseUrl": "https://claude-gateway.internal.example.com"
       }

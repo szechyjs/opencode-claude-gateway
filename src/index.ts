@@ -186,7 +186,7 @@ export default Plugin.define({
     const rawBaseUrl = ctx.options.baseUrl
     if (typeof rawBaseUrl !== "string" || !rawBaseUrl.trim()) {
       throw new Error(
-        `[${PLUGIN}] "baseUrl" option is required, e.g. { "package": "@szechyjs/opencode-claude-gateway", "options": { "baseUrl": "https://claude.example.com" } }`,
+        `[${PLUGIN}] "baseUrl" option is required, e.g. { "package": "opencode-claude-gateway", "options": { "baseUrl": "https://claude.example.com" } }`,
       )
     }
     const baseUrl = rawBaseUrl.trim().replace(/\/+$/, "")
