@@ -4,6 +4,14 @@
   "type": "module",
   "description": "OpenCode V2 plugin that connects to Anthropic's official Claude apps gateway (https://code.claude.com/docs/en/claude-apps-gateway) via device-code OAuth.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/szechyjs/opencode-claude-gateway.git"
+  },
+  "homepage": "https://github.com/szechyjs/opencode-claude-gateway#readme",
+  "bugs": {
+    "url": "https://github.com/szechyjs/opencode-claude-gateway/issues"
+  },
   "files": [
     "src",
     "README.md",
