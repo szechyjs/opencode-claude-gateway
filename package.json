@@ -4,9 +4,15 @@
   "type": "module",
   "description": "OpenCode V2 plugin that connects to Anthropic's official Claude apps gateway (https://code.claude.com/docs/en/claude-apps-gateway) via device-code OAuth.",
   "license": "MIT",
-  "files": ["src", "README.md", "LICENSE"],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./rpc": "./src/rpc.ts",
+    "./tui": "./src/tui.tsx"
   },
   "scripts": {
     "test": "bun test",
@@ -15,8 +21,28 @@
   "dependencies": {
     "@opencode/plugin": "latest"
   },
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.8",
+    "@opentui/solid": ">=0.5.8",
+    "solid-js": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
+  },
   "devDependencies": {
-    "typescript": "latest",
-    "@types/bun": "latest"
+    "@opencode/theme": "^2.0.32",
+    "@opentui/core": ">=0.5.8",
+    "@opentui/solid": ">=0.5.8",
+    "@types/bun": "latest",
+    "solid-js": ">=1.9.0",
+    "typescript": "latest"
   }
 }

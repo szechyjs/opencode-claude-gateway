@@ -17,6 +17,7 @@ It's a thin layer on top of OpenCode's stock `anthropic` provider package:
 3. Polls the gateway's `/v1/models` endpoint, the same request the official
    client makes for [model discovery](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery),
    to list the models your group's policy actually grants.
+4. Shows your quota in the terminal UI footer (see [Quota footer](#quota-footer)).
 
 ## Requirements
 
@@ -50,6 +51,30 @@ It's a thin layer on top of OpenCode's stock `anthropic` provider package:
 | `name`    | no       | Display name for the provider. Defaults to `Claude Gateway`.      |
 
 Set `CLAUDE_GATEWAY_DEBUG=1` for verbose logging.
+
+## Quota footer
+
+While a Claude Gateway model is selected, the home and prompt footers show
+your current quota window and spend:
+
+```
+Quota month 4% $45.79 / $1,230.00
+```
+
+The gateway enforces whichever limit is active for your account (daily, weekly
+or monthly) and reports spend against that limit's cap, so the footer shows
+that window's percent followed by `used / cap`. If several windows are active
+they are all listed, in daily, weekly, monthly order. An entry turns yellow at
+80% or when the gateway marks it as a warning, and red at 100% or for any more
+severe state. The reset time appears once a window is at 80% or above.
+
+The data comes from `GET <baseUrl>/api/oauth/usage`, fetched by the server
+plugin with your gateway token, cached for 30 seconds, and refreshed by the
+terminal UI every minute and after each completed step. If the gateway is
+unreachable or you're signed out, the footer is simply hidden.
+
+The footer is a CLI plugin (`./tui`) shipped in the same package, so OpenCode
+loads it automatically alongside the server plugin.
 
 ## How the auth flow works
 

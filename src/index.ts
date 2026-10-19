@@ -6,6 +6,8 @@
 // since the gateway speaks the Anthropic Messages API
 // (https://code.claude.com/docs/en/llm-gateway-protocol).
 import { Integration, Model, Plugin, Provider } from "@opencode/plugin"
+import { GatewayRpc } from "./rpc"
+import { fetchUsage, type Usage } from "./usage"
 
 const PLUGIN = "claude-gateway"
 // Keep the V1-migrated credential method ID. OpenCode imports legacy OAuth
@@ -31,6 +33,10 @@ const STARTUP_TIMEOUT = 3_000
 const REQUEST_TIMEOUT = 15_000
 
 const STORAGE_MODELS_KEY = "models"
+
+// Footers poll the usage endpoint, so concurrent TUIs and repeated polls share
+// one upstream request per window.
+const USAGE_TTL = 30_000
 
 // A model the gateway serves. The protocol's /v1/models response carries only
 // `id`, an optional `display_name`, and an optional `description` — see
@@ -124,6 +130,14 @@ function parseCachedModels(value: unknown): GatewayModel[] | undefined {
   return served.length ? served : undefined
 }
 
+/** The active connection's access token, or undefined when signed out or expired. */
+async function accessToken(ctx: any): Promise<string | undefined> {
+  const connection = await ctx.integration.connection.active(PLUGIN)
+  const credential = connection ? await ctx.integration.connection.resolve(connection) : undefined
+  if (credential?.type !== "oauth" || isStale(credential)) return undefined
+  return credential.access
+}
+
 /**
  * Mirrors the real Claude Code client's gateway model discovery request: see
  * https://code.claude.com/docs/en/llm-gateway-protocol#request-and-response.
@@ -132,12 +146,11 @@ function parseCachedModels(value: unknown): GatewayModel[] | undefined {
  */
 async function discover(ctx: any, modelsUrl: string, timeout: number): Promise<GatewayModel[] | undefined> {
   try {
-    const connection = await ctx.integration.connection.active(PLUGIN)
-    const credential = connection ? await ctx.integration.connection.resolve(connection) : undefined
-    if (credential?.type !== "oauth" || isStale(credential)) return undefined
+    const token = await accessToken(ctx)
+    if (!token) return undefined
 
     const response = await fetch(modelsUrl, {
-      headers: { authorization: `Bearer ${credential.access}`, "anthropic-version": "2023-06-01" },
+      headers: { authorization: `Bearer ${token}`, "anthropic-version": "2023-06-01" },
       signal: AbortSignal.timeout(timeout),
       redirect: "error",
     })
@@ -179,6 +192,7 @@ export default Plugin.define({
     const baseUrl = rawBaseUrl.trim().replace(/\/+$/, "")
     const displayName = (ctx.options.name as string | undefined)?.trim() || "Claude Gateway"
     const modelsUrl = `${baseUrl}/v1/models?limit=1000`
+    const usageUrl = `${baseUrl}/api/oauth/usage`
     const providerID = Provider.ID.make(PLUGIN)
 
     const { deviceUrl, tokenUrl, scope } = await discoverAuthServer(baseUrl, STARTUP_TIMEOUT)
@@ -289,6 +303,23 @@ export default Plugin.define({
       return refreshInFlight
     }
 
+    let cachedUsage: { token: string; at: number; usage: Usage } | undefined
+    const rpc = await ctx.rpc.register(GatewayRpc, {
+      usage: async (_input, context) => {
+        const unavailable = (reason: string) => context.error("unavailable", reason, { reason })
+        const token = await accessToken(ctx).catch(() => undefined)
+        if (!token) return unavailable("not signed in")
+        if (cachedUsage?.token === token && Date.now() - cachedUsage.at < USAGE_TTL) return cachedUsage.usage
+        try {
+          const usage = await fetchUsage(usageUrl, token, REQUEST_TIMEOUT)
+          cachedUsage = { token, at: Date.now(), usage }
+          return usage
+        } catch (error: any) {
+          return unavailable(error?.message ?? "gateway unreachable")
+        }
+      },
+    })
+
     // Refresh after login/account switching and periodically while the gateway
     // is reachable. Abort the event stream and timer when the plugin unloads.
     const controller = new AbortController()
@@ -310,6 +341,7 @@ export default Plugin.define({
     return () => {
       controller.abort()
       clearInterval(timer)
+      void rpc.dispose()
     }
   },
 })
