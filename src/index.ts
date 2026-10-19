@@ -9,6 +9,9 @@ import { Integration, Model, Plugin, Provider } from "@opencode/plugin"
 import { GatewayRpc } from "./rpc"
 import { fetchUsage, GatewayError, type Usage } from "./usage"
 
+type Context = Plugin.Context
+type Connection = NonNullable<Awaited<ReturnType<Context["integration"]["connection"]["active"]>>>
+
 const PLUGIN = "claude-gateway"
 // Keep the V1-migrated credential method ID. OpenCode imports legacy OAuth
 // entries with methodID "oauth"; using the same ID lets those credentials be
@@ -26,13 +29,16 @@ const SKEW = 60_000
 
 // The gateway may only be reachable over a VPN or from specific networks. Off
 // that network a request to it either stalls on connect until the OS gives up
-// or dies at DNS, so no fetch here may be unbounded — an unbounded one on the
-// startup path hangs all of opencode. Startup gets a much tighter budget than
-// a live request, which can afford to wait out a merely slow gateway.
-const STARTUP_TIMEOUT = 3_000
+// or dies at DNS, so no fetch here may be unbounded. Probes that only decide
+// what to do next get a tight budget; a live request can afford to wait out a
+// merely slow gateway. Nothing on the plugin's startup path touches the
+// network, so being offline never delays opencode launching.
+const PROBE_TIMEOUT = 3_000
 const REQUEST_TIMEOUT = 15_000
 
-const STORAGE_MODELS_KEY = "models"
+// Model inventories depend on the account's group policy, so each connection
+// has its own cache entry.
+const STORAGE_MODELS_PREFIX = "models/"
 
 // Footers poll the usage endpoint, so concurrent TUIs and repeated polls share
 // one upstream request per window.
@@ -46,7 +52,7 @@ const USAGE_TTL = 30_000
 type GatewayModel = { id: string; displayName?: string }
 
 /** Convert a model the gateway served into an OpenCode V2 model definition. */
-function describe(providerID: any, served: GatewayModel) {
+function describe(providerID: Provider.ID, served: GatewayModel) {
   return {
     ...Model.Info.default(providerID, Model.ID.make(served.id)),
     name: served.displayName ?? served.id,
@@ -91,34 +97,48 @@ function debug(message: string) {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/**
- * Resolves the OAuth device/token endpoints and scope from the gateway's
- * RFC 8414 discovery document, which the quickstart's own verification step
- * checks first: https://code.claude.com/docs/en/claude-apps-gateway#quickstart.
- * Falls back to the gateway's conventional `/oauth/device_authorization` +
- * `/oauth/token` paths and the `openid profile email` scope — the same
- * defaults shown in that quickstart — if discovery is slow or unreachable at
- * startup, so a network hiccup doesn't block login entirely.
- */
-export async function discoverAuthServer(baseUrl: string, timeout: number) {
-  const fallback = {
+export type AuthServer = { deviceUrl: string; tokenUrl: string; scope: string }
+
+function fallbackAuthServer(baseUrl: string): AuthServer {
+  return {
     deviceUrl: `${baseUrl}${DEFAULT_DEVICE_PATH}`,
     tokenUrl: `${baseUrl}${DEFAULT_TOKEN_PATH}`,
     scope: DEFAULT_SCOPE,
   }
+}
+
+/**
+ * Reads the OAuth device/token endpoints and scope from the gateway's RFC 8414
+ * discovery document, which the quickstart's own verification step checks
+ * first: https://code.claude.com/docs/en/claude-apps-gateway#quickstart.
+ * Returns undefined when the document can't be fetched, so callers can retry
+ * later instead of treating a network hiccup as the answer.
+ */
+async function fetchAuthServer(baseUrl: string, timeout: number): Promise<AuthServer | undefined> {
+  const fallback = fallbackAuthServer(baseUrl)
   try {
     const response = await fetch(`${baseUrl}${DISCOVERY_PATH}`, { signal: AbortSignal.timeout(timeout) })
-    if (!response.ok) return fallback
+    if (!response.ok) return undefined
     const doc: any = await response.json().catch(() => undefined)
-    if (!doc || typeof doc !== "object") return fallback
+    if (!doc || typeof doc !== "object") return undefined
     const deviceUrl = typeof doc.device_authorization_endpoint === "string" ? doc.device_authorization_endpoint : fallback.deviceUrl
     const tokenUrl = typeof doc.token_endpoint === "string" ? doc.token_endpoint : fallback.tokenUrl
     const scopes = Array.isArray(doc.scopes_supported) ? doc.scopes_supported.filter((s: unknown) => typeof s === "string") : []
     const scope = scopes.length ? scopes.join(" ") : fallback.scope
     return { deviceUrl, tokenUrl, scope }
   } catch {
-    return fallback
+    return undefined
   }
+}
+
+/**
+ * Falls back to the gateway's conventional `/oauth/device_authorization` +
+ * `/oauth/token` paths and the `openid profile email` scope — the same
+ * defaults shown in the quickstart — if discovery is slow or unreachable, so a
+ * network hiccup doesn't block login entirely.
+ */
+export async function discoverAuthServer(baseUrl: string, timeout: number): Promise<AuthServer> {
+  return (await fetchAuthServer(baseUrl, timeout)) ?? fallbackAuthServer(baseUrl)
 }
 
 /** Reads the model cache written by a previous run, tolerating bad/partial data. */
@@ -130,18 +150,20 @@ function parseCachedModels(value: unknown): GatewayModel[] | undefined {
   return served.length ? served : undefined
 }
 
+function connectionKey(connection: Connection) {
+  return connection.type === "credential" ? connection.id : `env:${connection.name}`
+}
+
+const activeConnection = (ctx: Context) => ctx.integration.connection.active(PLUGIN).catch(() => undefined)
+
 /**
- * The active connection's access token. `signedIn` is false only when there is
- * no connection at all; a connection whose token can't be used (expired and
- * the refresh failed, typically because the gateway is unreachable) is still
- * signed in, just without a token.
+ * The connection's access token, or undefined when it's expired and couldn't
+ * be refreshed — typically because the gateway is unreachable.
  */
-async function credentialState(ctx: any): Promise<{ signedIn: boolean; token?: string }> {
-  const connection = await ctx.integration.connection.active(PLUGIN).catch(() => undefined)
-  if (!connection) return { signedIn: false }
+async function accessToken(ctx: Context, connection: Connection): Promise<string | undefined> {
   const credential = await ctx.integration.connection.resolve(connection).catch(() => undefined)
-  if (credential?.type !== "oauth" || isStale(credential)) return { signedIn: true }
-  return { signedIn: true, token: credential.access }
+  if (credential?.type !== "oauth" || isStale(credential)) return undefined
+  return credential.access
 }
 
 /**
@@ -150,11 +172,8 @@ async function credentialState(ctx: any): Promise<{ signedIn: boolean; token?: s
  * A redirect is treated as a failure so the credential can't leak to a
  * redirect target, same as the official client.
  */
-async function discover(ctx: any, modelsUrl: string, timeout: number): Promise<GatewayModel[] | undefined> {
+async function discover(token: string, modelsUrl: string, timeout: number): Promise<GatewayModel[] | undefined> {
   try {
-    const { token } = await credentialState(ctx)
-    if (!token) return undefined
-
     const response = await fetch(modelsUrl, {
       headers: { authorization: `Bearer ${token}`, "anthropic-version": "2023-06-01" },
       signal: AbortSignal.timeout(timeout),
@@ -201,7 +220,13 @@ export default Plugin.define({
     const usageUrl = `${baseUrl}/api/oauth/usage`
     const providerID = Provider.ID.make(PLUGIN)
 
-    const { deviceUrl, tokenUrl, scope } = await discoverAuthServer(baseUrl, STARTUP_TIMEOUT)
+    // Resolved on first use rather than at startup. A successful lookup is kept
+    // for the life of the plugin; a failed one is retried next time.
+    let authServer: AuthServer | undefined
+    const resolveAuthServer = async () => {
+      authServer ??= await fetchAuthServer(baseUrl, PROBE_TIMEOUT)
+      return authServer ?? fallbackAuthServer(baseUrl)
+    }
 
     // V2 stores provider credentials through its integration service rather than
     // auth.json. The integration method also gives V2 ownership of token refresh,
@@ -213,6 +238,7 @@ export default Plugin.define({
         integrationID: PLUGIN,
         method: { id: AUTH_METHOD, type: "oauth", label: "Device login" },
         authorize: async () => {
+          const { deviceUrl, tokenUrl, scope } = await resolveAuthServer()
           const device = await form(deviceUrl, { scope })
           if (!device.device_code) {
             throw new Error(`Device authorization failed: ${device.error ?? "no device_code in response"}`)
@@ -253,6 +279,7 @@ export default Plugin.define({
           }
         },
         refresh: async (credential) => {
+          const { tokenUrl } = await resolveAuthServer()
           const json = await form(tokenUrl, {
             grant_type: "refresh_token",
             refresh_token: credential.refresh,
@@ -262,18 +289,18 @@ export default Plugin.define({
       })
     })
 
-    const source: { models: GatewayModel[] } = {
-      models: parseCachedModels(await ctx.storage.get(STORAGE_MODELS_KEY)) ?? [],
-    }
-    if (!source.models.length) {
-      const discovered = await discover(ctx, modelsUrl, STARTUP_TIMEOUT)
-      if (discovered?.length) {
-        source.models = discovered
-        await ctx.storage.set(STORAGE_MODELS_KEY, discovered)
-      }
-    }
+    // The inventory is bound to the connection that produced it: OpenCode hides
+    // the provider while a different connection is selected, until a refreshed
+    // inventory for that connection is published.
+    const source: { connection?: Connection; models: GatewayModel[] } = { models: [] }
+    const readCache = async (connection: Connection) =>
+      parseCachedModels(await ctx.storage.get(`${STORAGE_MODELS_PREFIX}${connectionKey(connection)}`))
 
-    let modelDefinitions = source.models.map((served) => describe(providerID, served))
+    const initial = await activeConnection(ctx)
+    if (initial) {
+      source.connection = initial
+      source.models = (await readCache(initial)) ?? []
+    }
 
     await ctx.provider.transform((editor) => {
       editor.add({
@@ -286,26 +313,37 @@ export default Plugin.define({
           settings: { baseURL: `${baseUrl}/v1` },
         },
         // The transform is replayed on reload, so it always sees the latest
-        // discovered list without performing network I/O inside the callback.
-        models: modelDefinitions,
+        // inventory without performing network I/O inside the callback.
+        models: source.models.map((served) => describe(providerID, served)),
+        ...(source.connection ? { sourceConnection: source.connection } : {}),
       })
     })
 
+    const refreshModels = async () => {
+      const connection = await activeConnection(ctx)
+      if (!connection) return
+
+      if (!source.connection || connectionKey(source.connection) !== connectionKey(connection)) {
+        source.connection = connection
+        source.models = (await readCache(connection)) ?? []
+        await ctx.provider.reload()
+      }
+
+      const token = await accessToken(ctx, connection)
+      const discovered = token ? await discover(token, modelsUrl, REQUEST_TIMEOUT) : undefined
+      if (!discovered?.length || JSON.stringify(discovered) === JSON.stringify(source.models)) return
+      if (!source.connection || connectionKey(source.connection) !== connectionKey(connection)) return
+
+      source.models = discovered
+      await ctx.storage.set(`${STORAGE_MODELS_PREFIX}${connectionKey(connection)}`, discovered)
+      await ctx.provider.reload()
+    }
+
     let refreshInFlight: Promise<void> | undefined
     const refresh = () => {
-      if (!refreshInFlight) {
-        refreshInFlight = (async () => {
-          const discovered = await discover(ctx, modelsUrl, REQUEST_TIMEOUT)
-          if (!discovered?.length) return
-          if (JSON.stringify(discovered) === JSON.stringify(source.models)) return
-          source.models = discovered
-          modelDefinitions = discovered.map((served) => describe(providerID, served))
-          await ctx.storage.set(STORAGE_MODELS_KEY, discovered)
-          await ctx.provider.reload()
-        })().finally(() => {
-          refreshInFlight = undefined
-        })
-      }
+      refreshInFlight ??= refreshModels().finally(() => {
+        refreshInFlight = undefined
+      })
       return refreshInFlight
     }
 
@@ -313,12 +351,13 @@ export default Plugin.define({
     const rpc = await ctx.rpc.register(GatewayRpc, {
       usage: async (_input, context) => {
         const unavailable = (code: string, message: string) => context.error("unavailable", message, { code })
-        const { signedIn, token } = await credentialState(ctx)
-        if (!signedIn) return unavailable("signed_out", "not signed in to the gateway")
+        const connection = await activeConnection(ctx)
+        if (!connection) return unavailable("signed_out", "not signed in to the gateway")
+        const token = await accessToken(ctx, connection)
         if (!token) {
           // Expired and not refreshable: unauthenticated probe tells an
           // unreachable gateway apart from a rejected refresh token.
-          const probe = await fetchUsage(usageUrl, "", STARTUP_TIMEOUT).catch((error) => error)
+          const probe = await fetchUsage(usageUrl, "", PROBE_TIMEOUT).catch((error) => error)
           if (probe instanceof GatewayError && (probe.code === "unreachable" || probe.code === "timeout")) {
             return unavailable(probe.code, probe.message)
           }
@@ -340,20 +379,17 @@ export default Plugin.define({
     // Refresh after login/account switching and periodically while the gateway
     // is reachable. Abort the event stream and timer when the plugin unloads.
     const controller = new AbortController()
+    const refreshQuietly = () => void refresh().catch((error) => log(`model refresh failed: ${error}`))
     void (async () => {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-        const data = (event as any).data ?? (event as any).properties
-        if ((event as any).type === "credential.switched" && data?.integrationID === PLUGIN) {
-          await refresh().catch((error) => log(`model refresh failed: ${error}`))
-        }
+        if (event.type === "credential.switched" && event.data.integrationID === PLUGIN) refreshQuietly()
       }
     })().catch((error) => {
       if (!controller.signal.aborted) log(`event subscription failed: ${error}`)
     })
 
-    const timer = setInterval(() => void refresh().catch((error) => log(`model refresh failed: ${error}`)), 60_000)
-    if (source.models.length) void refresh().catch(() => {})
-    debug(`using OAuth endpoints: ${deviceUrl}, ${tokenUrl}`)
+    const timer = setInterval(refreshQuietly, 60_000)
+    refreshQuietly()
 
     return () => {
       controller.abort()

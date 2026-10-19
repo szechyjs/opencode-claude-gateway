@@ -14,6 +14,7 @@
   },
   "files": [
     "src",
+    "!src/**/*.test.ts",
     "README.md",
     "LICENSE"
   ],
@@ -27,7 +28,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opencode/plugin": "latest"
+    "@opencode/plugin": "^2.0.32"
   },
   "peerDependencies": {
     "@opentui/core": ">=0.5.8",
