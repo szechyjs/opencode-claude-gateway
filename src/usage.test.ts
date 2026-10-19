@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { fetchUsage, footerEntries, formatMoney, formatReset, parseUsage, tone } from "./usage"
+import { fetchUsage, footerEntries, formatMoney, formatReset, GatewayError, parseUsage, tone } from "./usage"
 
 const limit = (group: string, percent: number, extra: Record<string, unknown> = {}) => ({
   kind: "spend",
@@ -130,8 +130,32 @@ describe("fetchUsage", () => {
     expect(usage.limits).toHaveLength(1)
   })
 
-  test("rejects on a non-2xx response", async () => {
-    globalThis.fetch = (async () => new Response("no", { status: 401 })) as unknown as typeof fetch
-    await expect(fetchUsage("https://gateway.test/api/oauth/usage", "jwt", 1000)).rejects.toThrow(/401/)
+  const url = "https://gateway.test/api/oauth/usage"
+  const failWith = async (stub: () => Promise<Response>) => {
+    globalThis.fetch = stub as unknown as typeof fetch
+    return fetchUsage(url, "jwt", 1000).catch((error) => error)
+  }
+
+  test("classifies a transport failure as unreachable", async () => {
+    const error = await failWith(async () => {
+      throw new TypeError("fetch failed")
+    })
+    expect(error).toBeInstanceOf(GatewayError)
+    expect(error.code).toBe("unreachable")
+  })
+
+  test("classifies an abort timeout as a timeout", async () => {
+    const error = await failWith(async () => {
+      throw Object.assign(new Error("timed out"), { name: "TimeoutError" })
+    })
+    expect(error.code).toBe("timeout")
+  })
+
+  test("classifies 401 and 403 as unauthorized, other statuses as http", async () => {
+    expect((await failWith(async () => new Response("no", { status: 401 }))).code).toBe("unauthorized")
+    expect((await failWith(async () => new Response("no", { status: 403 }))).code).toBe("unauthorized")
+    const http = await failWith(async () => new Response("no", { status: 503 }))
+    expect(http.code).toBe("http")
+    expect(http.status).toBe(503)
   })
 })

@@ -58,18 +58,39 @@ export function parseUsage(body: unknown): Usage {
   }
 }
 
+export type FailureCode = "unreachable" | "timeout" | "unauthorized" | "http"
+
+export class GatewayError extends Error {
+  constructor(
+    readonly code: FailureCode,
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message)
+  }
+}
+
 export async function fetchUsage(url: string, accessToken: string, timeout: number): Promise<Usage> {
-  const response = await fetch(url, {
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      "anthropic-beta": "oauth-2025-04-20",
-      "anthropic-version": "2023-06-01",
-    },
-    signal: AbortSignal.timeout(timeout),
-    redirect: "error",
-  })
-  if (!response.ok) throw new Error(`usage request failed with HTTP ${response.status}`)
-  return parseUsage(await response.json())
+  let response: Response
+  try {
+    response = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "anthropic-beta": "oauth-2025-04-20",
+        "anthropic-version": "2023-06-01",
+      },
+      signal: AbortSignal.timeout(timeout),
+      redirect: "error",
+    })
+  } catch (error: any) {
+    if (error?.name === "TimeoutError") throw new GatewayError("timeout", "gateway timed out")
+    throw new GatewayError("unreachable", "gateway unreachable")
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new GatewayError("unauthorized", `gateway rejected the credential (HTTP ${response.status})`, response.status)
+  }
+  if (!response.ok) throw new GatewayError("http", `gateway returned HTTP ${response.status}`, response.status)
+  return parseUsage(await response.json().catch(() => undefined))
 }
 
 export function tone(limit: Pick<Limit, "percent" | "severity">): Tone {

@@ -39,8 +39,8 @@ export const GatewayRpc = Rpc.define({
       errors: {
         unavailable: {
           type: "object",
-          properties: { reason: { type: "string" } },
-          required: ["reason"],
+          properties: { code: { type: "string" } },
+          required: ["code"],
           additionalProperties: false,
         },
       },

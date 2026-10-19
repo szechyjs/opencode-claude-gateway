@@ -7,7 +7,7 @@
 // (https://code.claude.com/docs/en/llm-gateway-protocol).
 import { Integration, Model, Plugin, Provider } from "@opencode/plugin"
 import { GatewayRpc } from "./rpc"
-import { fetchUsage, type Usage } from "./usage"
+import { fetchUsage, GatewayError, type Usage } from "./usage"
 
 const PLUGIN = "claude-gateway"
 // Keep the V1-migrated credential method ID. OpenCode imports legacy OAuth
@@ -130,12 +130,18 @@ function parseCachedModels(value: unknown): GatewayModel[] | undefined {
   return served.length ? served : undefined
 }
 
-/** The active connection's access token, or undefined when signed out or expired. */
-async function accessToken(ctx: any): Promise<string | undefined> {
-  const connection = await ctx.integration.connection.active(PLUGIN)
-  const credential = connection ? await ctx.integration.connection.resolve(connection) : undefined
-  if (credential?.type !== "oauth" || isStale(credential)) return undefined
-  return credential.access
+/**
+ * The active connection's access token. `signedIn` is false only when there is
+ * no connection at all; a connection whose token can't be used (expired and
+ * the refresh failed, typically because the gateway is unreachable) is still
+ * signed in, just without a token.
+ */
+async function credentialState(ctx: any): Promise<{ signedIn: boolean; token?: string }> {
+  const connection = await ctx.integration.connection.active(PLUGIN).catch(() => undefined)
+  if (!connection) return { signedIn: false }
+  const credential = await ctx.integration.connection.resolve(connection).catch(() => undefined)
+  if (credential?.type !== "oauth" || isStale(credential)) return { signedIn: true }
+  return { signedIn: true, token: credential.access }
 }
 
 /**
@@ -146,7 +152,7 @@ async function accessToken(ctx: any): Promise<string | undefined> {
  */
 async function discover(ctx: any, modelsUrl: string, timeout: number): Promise<GatewayModel[] | undefined> {
   try {
-    const token = await accessToken(ctx)
+    const { token } = await credentialState(ctx)
     if (!token) return undefined
 
     const response = await fetch(modelsUrl, {
@@ -306,16 +312,27 @@ export default Plugin.define({
     let cachedUsage: { token: string; at: number; usage: Usage } | undefined
     const rpc = await ctx.rpc.register(GatewayRpc, {
       usage: async (_input, context) => {
-        const unavailable = (reason: string) => context.error("unavailable", reason, { reason })
-        const token = await accessToken(ctx).catch(() => undefined)
-        if (!token) return unavailable("not signed in")
+        const unavailable = (code: string, message: string) => context.error("unavailable", message, { code })
+        const { signedIn, token } = await credentialState(ctx)
+        if (!signedIn) return unavailable("signed_out", "not signed in to the gateway")
+        if (!token) {
+          // Expired and not refreshable: unauthenticated probe tells an
+          // unreachable gateway apart from a rejected refresh token.
+          const probe = await fetchUsage(usageUrl, "", STARTUP_TIMEOUT).catch((error) => error)
+          if (probe instanceof GatewayError && (probe.code === "unreachable" || probe.code === "timeout")) {
+            return unavailable(probe.code, probe.message)
+          }
+          return unavailable("unauthorized", "gateway credential expired; sign in again")
+        }
         if (cachedUsage?.token === token && Date.now() - cachedUsage.at < USAGE_TTL) return cachedUsage.usage
         try {
           const usage = await fetchUsage(usageUrl, token, REQUEST_TIMEOUT)
           cachedUsage = { token, at: Date.now(), usage }
           return usage
         } catch (error: any) {
-          return unavailable(error?.message ?? "gateway unreachable")
+          debug(`usage request failed: ${error?.message ?? error}`)
+          if (error instanceof GatewayError) return unavailable(error.code, error.message)
+          return unavailable("http", error?.message ?? "unexpected gateway response")
         }
       },
     })

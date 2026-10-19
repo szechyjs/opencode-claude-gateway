@@ -73,6 +73,28 @@ plugin with your gateway token, cached for 30 seconds, and refreshed by the
 terminal UI every minute and after each completed step. If the gateway is
 unreachable or you're signed out, the footer is simply hidden.
 
+### Offline / VPN
+
+Claude apps gateways run on a private network, so the gateway is routinely
+unreachable away from the office or VPN. While a Claude Gateway model is
+selected, the footer replaces the quota with a hint, and you get one toast per
+change of state:
+
+| State | Footer | Toast |
+| ----- | ------ | ----- |
+| Unreachable or timed out | `Gateway offline — connect to your work network or VPN` | warning |
+| Not signed in | `Gateway: not signed in` | warning |
+| Credential rejected or expired | `Gateway: session expired, sign in again` | warning |
+| Any other HTTP error | `Gateway: usage unavailable` | error |
+| Back online after a problem | quota returns | success |
+
+Toasts fire only on a change, never on every poll, and never while another
+provider is selected — switching to a gateway model while it's down shows the
+toast then. While offline the footer re-checks every 15 seconds instead of 60,
+and a failed prompt triggers an immediate re-check. Cached models stay
+listed offline, so a prompt sent without a connection fails with OpenCode's
+normal provider error.
+
 The footer is a CLI plugin (`./tui`) shipped in the same package, so OpenCode
 loads it automatically alongside the server plugin.
 
