@@ -47,6 +47,13 @@ It's a thin layer on top of OpenCode's stock `anthropic` provider package:
 }
 ```
 
+> **TUI install workaround:** The npm-installed TUI entry currently fails to
+> load because OpenCode does not apply the Solid JSX transform to plugin files
+> under `node_modules` ([upstream issue #39986](https://github.com/anomalyco/opencode/issues/39986)).
+> Until a fix is released, use a source checkout by replacing
+> `"package": "opencode-claude-gateway"` above with an absolute path, such as
+> `"package": "/path/to/opencode-claude-gateway"`.
+
 | Option    | Required | Description                                                      |
 | --------- | -------- | ----------------------------------------------------------------- |
 | `baseUrl` | yes      | Your gateway's `listen.public_url`, e.g. `https://claude-gateway.internal.example.com`. |
