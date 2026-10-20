@@ -17,7 +17,9 @@ It's a thin layer on top of OpenCode's stock `anthropic` provider package:
 3. Polls the gateway's `/v1/models` endpoint, the same request the official
    client makes for [model discovery](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery),
    to list the models your group's policy actually grants.
-4. Shows your quota in the terminal UI footer (see [Quota footer](#quota-footer)).
+4. Adds a separate **Claude Sonnet 4.6 [1M]** model when the gateway exposes
+   Sonnet 4.6, sending the same context-window beta header as Claude Code.
+5. Shows your quota in the terminal UI footer (see [Quota footer](#quota-footer)).
 
 ## Requirements
 
@@ -116,8 +118,9 @@ loads it automatically alongside the server plugin.
 - Enterprise managed-settings delivery (model allowlists, forced permissions,
   telemetry policy) isn't applied to OpenCode; the gateway still enforces
   model access server-side regardless.
-- No pricing or context-limit metadata, since the gateway's `/v1/models`
-  response doesn't publish any — see
-  [model discovery](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery).
+- No pricing metadata: the gateway's `/v1/models` response doesn't publish it.
+  Known native 1M model IDs use their documented context limits; other models
+  default to 200K. Sonnet 4.6's separate `[1M]` entry opts into extended
+  context with `context-1m-2025-08-07`.
 - One gateway per plugin instance; add the plugin twice with different
   options if you need more than one.

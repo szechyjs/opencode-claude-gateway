@@ -47,16 +47,58 @@ const USAGE_TTL = 30_000
 // A model the gateway serves. The protocol's /v1/models response carries only
 // `id`, an optional `display_name`, and an optional `description` — see
 // https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery. There
-// is no pricing or context-limit field, so this plugin doesn't invent one;
-// cost and limits are whatever OpenCode's model defaults are.
+// is no pricing or context-limit field.
 type GatewayModel = { id: string; displayName?: string }
 
-/** Convert a model the gateway served into an OpenCode V2 model definition. */
-function describe(providerID: Provider.ID, served: GatewayModel) {
-  return {
-    ...Model.Info.default(providerID, Model.ID.make(served.id)),
+const DEFAULT_CONTEXT_LIMIT = 200_000
+const EXTENDED_CONTEXT_LIMIT = 1_000_000
+const CONTEXT_1M_BETA = "context-1m-2025-08-07"
+
+export function contextLimit(id: string) {
+  const model = id.toLowerCase()
+  if (model.includes("mythos-preview")) return EXTENDED_CONTEXT_LIMIT
+
+  const match = model.match(
+    /(?:^|[^a-z0-9])(?:claude[-._])?(fable|mythos|sonnet|opus|haiku)[-._]?(\d+)(?:[-._](\d+))?/,
+  )
+  if (!match) return DEFAULT_CONTEXT_LIMIT
+
+  const [, family, majorText, minorText] = match
+  const major = Number(majorText)
+  const minor = Number(minorText ?? 0)
+  const native1m =
+    ((family === "fable" || family === "mythos" || family === "sonnet") && major >= 5) ||
+    (family === "opus" && (major > 4 || (major === 4 && minor >= 7))) ||
+    (family === "haiku" && (major > 5 || (major === 5 && minor >= 5)))
+
+  // shortcut: unknown or aliased IDs stay at 200K; upgrade when discovery exposes context limits.
+  return native1m ? EXTENDED_CONTEXT_LIMIT : DEFAULT_CONTEXT_LIMIT
+}
+
+/** Convert a gateway model into OpenCode definitions, including its opt-in 1M model when supported. */
+export function modelDefinitions(providerID: Provider.ID, served: GatewayModel) {
+  const model = Model.Info.default(providerID, Model.ID.make(served.id))
+  const definition = {
+    ...model,
+    limit: { ...model.limit, context: contextLimit(served.id) },
     name: served.displayName ?? served.id,
   }
+  if (!isSonnet46(served.id)) return [definition]
+
+  return [
+    definition,
+    {
+      ...definition,
+      id: Model.ID.make(`${served.id}[1m]`),
+      name: `${definition.name} [1M]`,
+      limit: { ...definition.limit, context: EXTENDED_CONTEXT_LIMIT },
+      headers: { "anthropic-beta": CONTEXT_1M_BETA },
+    },
+  ]
+}
+
+function isSonnet46(id: string) {
+  return !/\[1m\]$/i.test(id) && /(?:^|[^a-z0-9])(?:claude[-._])?sonnet[-._]4[-._]6(?:[^0-9]|$)/i.test(id)
 }
 
 /** POSTs a form and normalizes the response to a plain object, never throwing. */
@@ -314,7 +356,7 @@ export default Plugin.define({
         },
         // The transform is replayed on reload, so it always sees the latest
         // inventory without performing network I/O inside the callback.
-        models: source.models.map((served) => describe(providerID, served)),
+        models: source.models.flatMap((served) => modelDefinitions(providerID, served)),
         ...(source.connection ? { sourceConnection: source.connection } : {}),
       })
     })

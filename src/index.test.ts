@@ -1,5 +1,61 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { discoverAuthServer, oauthCredential } from "./index"
+import { Provider } from "@opencode/plugin"
+import { contextLimit, discoverAuthServer, modelDefinitions, oauthCredential } from "./index"
+
+describe("contextLimit", () => {
+  test.each([
+    ["claude-sonnet-5-5", 1_000_000],
+    ["us.anthropic.claude-sonnet-5-5-v1:0", 1_000_000],
+    ["claude-opus-4-8", 1_000_000],
+    ["anthropic.claude-opus-4-7-v1:0", 1_000_000],
+    ["claude-haiku-5-5", 1_000_000],
+    ["claude-fable-5-1", 1_000_000],
+    ["claude-mythos-5", 1_000_000],
+    ["claude-mythos-preview", 1_000_000],
+    ["claude-sonnet-4-6", 200_000],
+    ["claude-opus-4-6", 200_000],
+    ["claude-sonnet-4-5-20250929", 200_000],
+    ["custom-model-alias", 200_000],
+  ])("returns the expected limit for %s", (id, limit) => {
+    expect(contextLimit(id)).toBe(limit)
+  })
+})
+
+describe("modelDefinitions", () => {
+  test("adds an opt-in Sonnet 4.6 1M entry using the same wire model ID", () => {
+    const [regular, extended] = modelDefinitions(Provider.ID.make("claude-gateway"), {
+      id: "claude-sonnet-4-6",
+      displayName: "Claude Sonnet 4.6",
+    })
+
+    expect(regular).toMatchObject({
+      id: "claude-sonnet-4-6",
+      modelID: "claude-sonnet-4-6",
+      name: "Claude Sonnet 4.6",
+      limit: { context: 200_000 },
+    })
+    expect(extended).toMatchObject({
+      id: "claude-sonnet-4-6[1m]",
+      modelID: "claude-sonnet-4-6",
+      name: "Claude Sonnet 4.6 [1M]",
+      limit: { context: 1_000_000 },
+      headers: { "anthropic-beta": "context-1m-2025-08-07" },
+    })
+  })
+
+  test("adds the variant for provider-prefixed Sonnet 4.6 IDs only", () => {
+    expect(
+      modelDefinitions(Provider.ID.make("claude-gateway"), {
+        id: "us.anthropic.claude-sonnet-4-6-v1:0",
+      }),
+    ).toHaveLength(2)
+    expect(
+      modelDefinitions(Provider.ID.make("claude-gateway"), {
+        id: "claude-sonnet-4-5",
+      }),
+    ).toHaveLength(1)
+  })
+})
 
 describe("oauthCredential", () => {
   test("throws when the gateway returns no access token", () => {
